@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { apiResponse } from '../utils/apiResponse.js'
 import { createAuthRouter } from '../modules/auth/auth.routes.js'
+import { createGenerationRouter } from '../modules/generation/generation.routes.js'
 
 /**
  * Enrutador principal de la API (/api/v1).
@@ -29,6 +30,18 @@ export function createApiRouter(container) {
       rateLimiters: container.rateLimiters,
       authenticate: container.authenticate,
       validate: container.validate,
+    })
+  )
+
+  // Módulo de generación de material de estudio con IA
+  router.use(
+    '/generation',
+    createGenerationRouter({
+      generationController: container.generationController,
+      rateLimiters: container.rateLimiters,
+      authenticate: container.authenticate,
+      validate: container.validate,
+      mediaUpload: container.mediaUpload,
     })
   )
 

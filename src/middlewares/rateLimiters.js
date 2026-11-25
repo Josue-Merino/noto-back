@@ -32,5 +32,14 @@ export function createRateLimiters() {
     handler,
   })
 
-  return { general, auth }
+  // Limitador de generación con IA (cada petición cuesta transcripción + tokens): 30 por hora por IP
+  const generation = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler,
+  })
+
+  return { general, auth, generation }
 }

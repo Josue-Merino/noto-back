@@ -1,5 +1,6 @@
 import dotenv from 'dotenv'
 import { z } from 'zod'
+import { GENERATION_DEFAULTS } from '../modules/generation/generation.config.js'
 
 dotenv.config()
 
@@ -14,6 +15,10 @@ const envSchema = z.object({
   EMAIL_REDIRECT_URL: z.string().url().default('http://localhost:5173/login'),
   PASSWORD_RESET_REDIRECT_URL: z.string().url().default('http://localhost:5173/reset-password'),
   LOG_LEVEL: z.string().default('debug'),
+  // Servicio de IA (noto-ai-server): transcripción + generación de material de estudio
+  NOTO_AI_URL: z.string().url('NOTO_AI_URL debe ser una URL válida').default(GENERATION_DEFAULTS.NOTO_AI_URL),
+  NOTO_AI_TIMEOUT_MS: z.coerce.number().int().positive().default(GENERATION_DEFAULTS.NOTO_AI_TIMEOUT_MS),
+  GENERATION_MAX_FILE_SIZE_MB: z.coerce.number().positive().default(GENERATION_DEFAULTS.GENERATION_MAX_FILE_SIZE_MB),
 })
 
 /**
