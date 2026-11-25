@@ -42,14 +42,14 @@ describe('Auth Module - Login y Sesión (/api/v1/auth/login, /me)', () => {
       firstName: 'Marcos',
       lastName: 'Ruiz',
       email: 'marcos@noto.com',
-      password: 'Password123',
-      confirmPassword: 'Password123',
+      password: 'Password123!',
+      confirmPassword: 'Password123!',
     })
 
     // 2. Intentar login
     const response = await request(app).post('/api/v1/auth/login').send({
       email: 'marcos@noto.com',
-      password: 'Password123',
+      password: 'Password123!',
     })
 
     expect(response.status).toBe(403)
@@ -74,8 +74,8 @@ describe('Auth Module - Login y Sesión (/api/v1/auth/login, /me)', () => {
       firstName: 'Lucia',
       lastName: 'Fernandez',
       email: 'lucia@noto.com',
-      password: 'Password123',
-      confirmPassword: 'Password123',
+      password: 'Password123!',
+      confirmPassword: 'Password123!',
     })
 
     // Confirmar en el fake
@@ -88,7 +88,7 @@ describe('Auth Module - Login y Sesión (/api/v1/auth/login, /me)', () => {
     // Iniciar sesión
     const loginRes = await request(app).post('/api/v1/auth/login').send({
       email: 'lucia@noto.com',
-      password: 'Password123',
+      password: 'Password123!',
     })
 
     expect(loginRes.status).toBe(200)

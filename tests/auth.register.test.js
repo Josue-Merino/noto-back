@@ -42,8 +42,8 @@ describe('Auth Module - Registro (/api/v1/auth/register)', () => {
       lastName: 'Pérez',
       secondLastName: 'Gómez',
       email: 'alejandro@noto.com',
-      password: 'Password123',
-      confirmPassword: 'Password123',
+      password: 'Password123!',
+      confirmPassword: 'Password123!',
     }
 
     const response = await request(app)
@@ -87,8 +87,8 @@ describe('Auth Module - Registro (/api/v1/auth/register)', () => {
       firstName: 'Carlos',
       lastName: 'Santana',
       email: 'carlos@noto.com',
-      password: 'Password123',
-      confirmPassword: 'Password123',
+      password: 'Password123!',
+      confirmPassword: 'Password123!',
     }
 
     // Primer registro

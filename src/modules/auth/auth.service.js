@@ -29,16 +29,9 @@ export class AuthService {
   async register({ firstName, middleName, lastName, secondLastName, email, password }) {
     const normalizedEmail = email.toLowerCase().trim()
 
-    // 1. Verificar si ya existe en la base de datos de usuarios
-    const existing = await this.userRepository.findByEmail(normalizedEmail)
-    if (existing) {
-      throw new ConflictError(
-        'El correo electrónico ya se encuentra registrado.',
-        'EMAIL_ALREADY_REGISTERED'
-      )
-    }
-
-    // 2. Registrar en Supabase Auth
+    // 1. Registrar en Supabase Auth. El trigger de alta del proyecto crea public."user" desde
+    //    user_metadata y exige name, last_name y nickname. El segundo nombre y el segundo
+    //    apellido también van en user_metadata porque public."user" no tiene columnas para ellos.
     const anonClient = this.createAnonClient()
     const { data: authData, error: authError } = await anonClient.auth.signUp({
       email: normalizedEmail,
@@ -46,8 +39,12 @@ export class AuthService {
       options: {
         emailRedirectTo: this.env.EMAIL_REDIRECT_URL,
         data: {
+          name: firstName,
           first_name: firstName,
+          middle_name: middleName || null,
           last_name: lastName,
+          second_last_name: secondLastName || null,
+          nickname: firstName,
         },
       },
     })
@@ -57,25 +54,21 @@ export class AuthService {
       throw mapSupabaseAuthError(authError)
     }
 
-    const userId = authData.user?.id
-    if (!userId) {
+    // Con la confirmación de correo activa, Supabase no devuelve error para un correo ya
+    // registrado: responde un usuario sin identidades.
+    const authUser = authData.user
+    if (!authUser?.id || (Array.isArray(authUser.identities) && authUser.identities.length === 0)) {
       throw new ConflictError(
         'El correo electrónico ya se encuentra registrado.',
         'EMAIL_ALREADY_REGISTERED'
       )
     }
+    const userId = authUser.id
 
-    // 3. Crear el perfil en public."user"
+    // 2. Crear el perfil en public."user"
     let profile
     try {
-      profile = await this.userRepository.create({
-        userId,
-        firstName,
-        middleName,
-        lastName,
-        secondLastName,
-        email: normalizedEmail,
-      })
+      profile = await this.userRepository.create({ userId, firstName, lastName }, authUser)
     } catch (dbError) {
       this.logger.error(
         { err: dbError, userId },
@@ -139,16 +132,18 @@ export class AuthService {
     const userId = authData.user.id
 
     // Obtener perfil de la base de datos
-    let profile = await this.userRepository.findById(userId)
+    let profile = await this.userRepository.findById(userId, authData.user)
     if (!profile) {
       // Fallback por si el usuario existía en Auth pero aún no tenía fila de perfil
       const meta = authData.user.user_metadata || {}
-      profile = await this.userRepository.create({
-        userId,
-        firstName: meta.first_name || 'Usuario',
-        lastName: meta.last_name || 'Noto',
-        email: normalizedEmail,
-      })
+      profile = await this.userRepository.create(
+        {
+          userId,
+          firstName: meta.first_name || meta.name || 'Usuario',
+          lastName: meta.last_name || 'Noto',
+        },
+        authData.user
+      )
     }
 
     this.logger.info({ userId, email: normalizedEmail }, 'Inicio de sesión exitoso')
@@ -274,8 +269,8 @@ export class AuthService {
   /**
    * Devuelve el perfil completo del usuario autenticado.
    */
-  async me({ userId }) {
-    const profile = await this.userRepository.findById(userId)
+  async me({ user }) {
+    const profile = await this.userRepository.findById(user.id, user)
     if (!profile) {
       throw new NotFoundError('Perfil de usuario no encontrado.', 'USER_NOT_FOUND')
     }
@@ -283,21 +278,36 @@ export class AuthService {
   }
 
   /**
-   * Actualiza los datos de perfil del usuario.
+   * Actualiza los datos de perfil del usuario. El segundo nombre y el segundo apellido se
+   * guardan en user_metadata de Supabase Auth.
    */
-  async updateProfile({ userId, firstName, middleName, lastName, secondLastName, avatarUrl }) {
-    const existing = await this.userRepository.findById(userId)
+  async updateProfile({ user, firstName, middleName, lastName, secondLastName, avatarUrl }) {
+    const userId = user.id
+    const existing = await this.userRepository.findById(userId, user)
     if (!existing) {
       throw new NotFoundError('Perfil de usuario no encontrado.', 'USER_NOT_FOUND')
     }
 
-    const updated = await this.userRepository.update(userId, {
-      firstName,
-      middleName,
-      lastName,
-      secondLastName,
-      avatarUrl,
-    })
+    let authUser = user
+    if (middleName !== undefined || secondLastName !== undefined) {
+      const meta = { ...(user.user_metadata || {}) }
+      if (middleName !== undefined) meta.middle_name = middleName || null
+      if (secondLastName !== undefined) meta.second_last_name = secondLastName || null
+      const { data, error } = await this.adminClient.auth.admin.updateUserById(userId, {
+        user_metadata: meta,
+      })
+      if (error) {
+        this.logger.error({ err: error, userId }, 'Error al actualizar user_metadata')
+        throw mapSupabaseAuthError(error)
+      }
+      authUser = data?.user || { ...user, user_metadata: meta }
+    }
+
+    const updated = await this.userRepository.update(
+      userId,
+      { firstName, lastName, avatarUrl },
+      authUser
+    )
 
     this.logger.info({ userId }, 'Perfil de usuario actualizado con éxito')
     return toPublicDTO(updated)

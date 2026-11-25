@@ -137,6 +137,16 @@ export function createFakeSupabase() {
         }),
       }),
 
+      upsert: (row) => ({
+        select: () => ({
+          single: async () => {
+            const copy = { ...(usersDb.get(row.user_id) || {}), ...row }
+            usersDb.set(row.user_id, copy)
+            return { data: copy, error: null }
+          },
+        }),
+      }),
+
       select: (_fields = '*') => ({
         eq: (col, val) => ({
           single: async () => {

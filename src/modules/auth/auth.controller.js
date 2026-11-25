@@ -88,7 +88,7 @@ export class AuthController {
   })
 
   me = asyncHandler(async (req, res) => {
-    const user = await this.authService.me({ userId: req.user.id })
+    const user = await this.authService.me({ user: req.user })
     return apiResponse.success(res, {
       data: user,
       status: 200,
@@ -97,8 +97,8 @@ export class AuthController {
 
   updateProfile = asyncHandler(async (req, res) => {
     const user = await this.authService.updateProfile({
-      userId: req.user.id,
       ...req.body,
+      user: req.user,
     })
     return apiResponse.success(res, {
       message: 'Perfil de usuario actualizado exitosamente.',

@@ -1,24 +1,22 @@
 -- ==============================================================================
 -- Noto: Migración inicial de base de datos
 -- Tabla de perfiles de usuario vinculada a Supabase Auth
+-- (el proyecto eluxfpkoastufmznbuzf ya la tiene; esto sirve para crear un proyecto nuevo)
 -- ==============================================================================
 
--- 1. Crear tabla pública "user" referenciando auth.users
+-- 1. Tabla pública "user" (mismo esquema del proyecto de Noto, eluxfpkoastufmznbuzf).
+--    El correo y la fecha de alta viven en auth.users; el segundo nombre y el segundo
+--    apellido, en auth.users.raw_user_meta_data (middle_name, second_last_name).
 create table if not exists public."user" (
   user_id uuid primary key references auth.users(id) on delete cascade,
-  first_name text not null,
-  middle_name text null,
-  last_name text not null,
-  second_last_name text null,
-  email text not null unique,
-  nickname text null,
-  avatar_url text null,
-  credits integer not null default 0 check (credits >= 0),
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  name varchar not null,
+  last_name varchar not null,
+  nickname varchar not null,
+  credits real not null default '0'::real,
+  image_url text null
 );
 
--- 2. Función y Trigger para mantener updated_at automáticamente
+-- 2. Función para mantener updated_at automáticamente (la usan las tablas de la migración 002)
 create or replace function public.handle_updated_at()
 returns trigger as $$
 begin
@@ -26,12 +24,6 @@ begin
   return new;
 end;
 $$ language plpgsql;
-
-drop trigger if exists set_user_updated_at on public."user";
-create trigger set_user_updated_at
-  before update on public."user"
-  for each row
-  execute function public.handle_updated_at();
 
 -- 3. Habilitar Row Level Security (RLS) como defensa en profundidad
 alter table public."user" enable row level security;

@@ -1,5 +1,8 @@
 import { z } from 'zod'
 
+// Supabase Auth del proyecto exige minúscula, mayúscula, número y uno de estos símbolos
+const PASSWORD_SYMBOL_RE = /[!@#$%^&*()_+\-=[\]{};':"\\|<>?,./`~]/
+
 const optionalString = z
   .string()
   .trim()
@@ -32,8 +35,10 @@ export const registerSchema = z
       .string({ required_error: 'La contraseña es obligatoria' })
       .min(8, 'La contraseña debe tener al menos 8 caracteres')
       .max(72, 'La contraseña no puede exceder 72 caracteres')
-      .regex(/[a-zA-Z]/, 'La contraseña debe contener al menos una letra')
-      .regex(/[0-9]/, 'La contraseña debe contener al menos un número'),
+      .regex(/[a-z]/, 'La contraseña debe contener al menos una minúscula')
+      .regex(/[A-Z]/, 'La contraseña debe contener al menos una mayúscula')
+      .regex(/[0-9]/, 'La contraseña debe contener al menos un número')
+      .regex(PASSWORD_SYMBOL_RE, 'La contraseña debe contener al menos un símbolo (por ejemplo ! @ # $ %)'),
     confirmPassword: z
       .string({ required_error: 'Confirma tu contraseña' })
       .min(1, 'Confirma tu contraseña'),
@@ -75,8 +80,10 @@ export const resetPasswordSchema = z
       .string({ required_error: 'La nueva contraseña es obligatoria' })
       .min(8, 'La contraseña debe tener al menos 8 caracteres')
       .max(72, 'La contraseña no puede exceder 72 caracteres')
-      .regex(/[a-zA-Z]/, 'La contraseña debe contener al menos una letra')
-      .regex(/[0-9]/, 'La contraseña debe contener al menos un número'),
+      .regex(/[a-z]/, 'La contraseña debe contener al menos una minúscula')
+      .regex(/[A-Z]/, 'La contraseña debe contener al menos una mayúscula')
+      .regex(/[0-9]/, 'La contraseña debe contener al menos un número')
+      .regex(PASSWORD_SYMBOL_RE, 'La contraseña debe contener al menos un símbolo (por ejemplo ! @ # $ %)'),
     confirmPassword: z
       .string({ required_error: 'Confirma tu contraseña' })
       .min(1, 'Confirma tu contraseña'),
@@ -96,8 +103,10 @@ export const changePasswordSchema = z
       .string({ required_error: 'La nueva contraseña es obligatoria' })
       .min(8, 'La contraseña debe tener al menos 8 caracteres')
       .max(72, 'La contraseña no puede exceder 72 caracteres')
-      .regex(/[a-zA-Z]/, 'La contraseña debe contener al menos una letra')
-      .regex(/[0-9]/, 'La contraseña debe contener al menos un número'),
+      .regex(/[a-z]/, 'La contraseña debe contener al menos una minúscula')
+      .regex(/[A-Z]/, 'La contraseña debe contener al menos una mayúscula')
+      .regex(/[0-9]/, 'La contraseña debe contener al menos un número')
+      .regex(PASSWORD_SYMBOL_RE, 'La contraseña debe contener al menos un símbolo (por ejemplo ! @ # $ %)'),
     confirmPassword: z
       .string({ required_error: 'Confirma tu contraseña' })
       .min(1, 'Confirma tu contraseña'),

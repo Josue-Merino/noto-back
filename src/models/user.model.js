@@ -1,31 +1,38 @@
 /**
  * Modelo de dominio y funciones de mapeo para la entidad User.
+ *
+ * La tabla public."user" de Noto guarda: user_id, name, last_name, nickname (obligatorio),
+ * credits e image_url. El correo y la fecha de alta vienen del usuario de Supabase Auth, y el
+ * segundo nombre y el segundo apellido de su user_metadata (middle_name, second_last_name).
  */
 
 /**
  * Transforma una fila de PostgreSQL (snake_case) al modelo de dominio (camelCase).
- * @param {object | null} row
+ * @param {object | null} row Fila de public."user"
+ * @param {object | null} [authUser] Usuario de Supabase Auth (email, created_at, user_metadata)
  * @returns {object | null}
  */
-export function fromRow(row) {
+export function fromRow(row, authUser = null) {
   if (!row) return null
 
-  const parts = [row.first_name, row.middle_name, row.last_name, row.second_last_name].filter(Boolean)
-  const fullName = parts.join(' ')
+  const meta = authUser?.user_metadata || {}
+  const middleName = meta.middle_name || null
+  const secondLastName = meta.second_last_name || null
+  const fullName = [row.name, middleName, row.last_name, secondLastName].filter(Boolean).join(' ')
 
   return {
     id: row.user_id,
-    firstName: row.first_name,
-    middleName: row.middle_name || null,
+    firstName: row.name,
+    middleName,
     lastName: row.last_name,
-    secondLastName: row.second_last_name || null,
+    secondLastName,
     fullName,
-    email: row.email,
+    email: authUser?.email ?? null,
     nickname: row.nickname || null,
-    avatarUrl: row.avatar_url || null,
+    avatarUrl: row.image_url || null,
     credits: row.credits ?? 0,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: authUser?.created_at ?? null,
+    updatedAt: authUser?.updated_at ?? null,
   }
 }
 

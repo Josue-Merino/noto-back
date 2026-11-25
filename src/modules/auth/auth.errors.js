@@ -60,6 +60,13 @@ export function mapSupabaseAuthError(error) {
     )
   }
 
+  // Contraseña que no cumple la política de Supabase Auth del proyecto
+  if (error.code === 'weak_password' || error.name === 'AuthWeakPasswordError') {
+    const message =
+      'La contraseña debe tener al menos 8 caracteres, una minúscula, una mayúscula, un número y un símbolo (por ejemplo ! @ # $ %).'
+    return new BadRequestError(message, 'WEAK_PASSWORD', { password: message })
+  }
+
   // Límite de envíos alcanzado
   if (msg.includes('rate limit') || msg.includes('too many requests') || status === 429) {
     return new TooManyRequestsError(
