@@ -8,6 +8,7 @@ import { createContainer } from '../src/container.js'
 import { createLogger } from '../src/config/logger.js'
 import { BadGatewayError, UnprocessableEntityError } from '../src/errors/httpErrors.js'
 import { createFakeSupabase } from './helpers/fakeSupabase.js'
+import { InMemoryStudyMaterialStore } from '../src/modules/study/study.store.memory.js'
 
 const TOKEN = 'valid-user-token'
 const OTHER_TOKEN = 'other-user-token'
@@ -92,9 +93,10 @@ describe('Generation Module - trabajos asíncronos', () => {
   let container
   let aiClient
   let preparer
+  let studyStore
   let tmpDir
 
-  async function buildApp(envOverrides = {}) {
+  async function buildApp(envOverrides = {}, { keepStore = false } = {}) {
     const fakeSupabase = createFakeSupabase()
     for (const [id, token] of [['usr_1', TOKEN], ['usr_2', OTHER_TOKEN]]) {
       fakeSupabase._internal.usersAuth.set(id, {
@@ -118,6 +120,8 @@ describe('Generation Module - trabajos asíncronos', () => {
     const logger = createLogger(testEnv)
     aiClient = createFakeAiClient()
     preparer = createFakePreparer()
+    // keepStore simula un reinicio del back: se pierde la memoria, la "base de datos" sigue
+    studyStore = keepStore ? studyStore : new InMemoryStudyMaterialStore()
 
     container = createContainer({
       env: testEnv,
@@ -126,6 +130,7 @@ describe('Generation Module - trabajos asíncronos', () => {
       logger,
       notoAiClient: aiClient,
       audioPreparer: preparer,
+      studyStore,
     })
     app = createApp({ container, env: testEnv, logger })
   }
@@ -426,5 +431,149 @@ describe('Generation Module - trabajos asíncronos', () => {
     expect(res.status).toBe(413)
     expect(res.body.error.code).toBe('FILE_TOO_LARGE')
     expect(await filesInTmp()).toHaveLength(0)
+  })
+
+  // ===== Persistencia en Supabase (store en memoria con las mismas tablas) =====
+  const list = (token = TOKEN) => request(app).get('/api/v1/generation').set('Authorization', `Bearer ${token}`)
+  const study = (url, body, token = TOKEN) =>
+    request(app).post(`/api/v1/study/${url}`).set('Authorization', `Bearer ${token}`).send(body)
+
+  it('debe guardar el material al completarse y servirlo con ids de tarjetas, preguntas y opciones', async () => {
+    const { body } = await create('full')
+    await idle()
+
+    const note = studyStore.tables.note.find((n) => n.note_id === body.data.id)
+    expect(note).toMatchObject({ user_id: 'usr_1', title: 'Fotosíntesis' })
+    // Mismo formato que el datasource de la IA: Resumen → Contenido → Items de Acción → Tarea
+    const blocks = studyStore.tables.block.filter((b) => b.note_id === body.data.id)
+    expect(blocks.map((b) => b.content)).toEqual([
+      'Resumen', 'Resumen de la clase', 'Contenido', '🌱 Fotosíntesis', 'Texto', 'Items de Acción', 'Leer el capítulo 3', 'Tarea', 'Ejercicios 1-5',
+    ])
+
+    const { content } = (await get(body.data.id)).body.data
+    expect(content.notes).toMatchObject({
+      summary: 'Resumen de la clase',
+      blocks: [{ type: 'heading1', text: 'Fotosíntesis', emoji: '🌱' }, { type: 'paragraph', text: 'Texto', emoji: null }],
+      actionItems: ['Leer el capítulo 3'],
+      homework: ['Ejercicios 1-5'],
+    })
+    expect(content.flashcards.cards[0]).toMatchObject({ front: '¿Dónde ocurre?', back: 'En el cloroplasto', review: null })
+    expect(content.flashcards.cards[0].id).toEqual(expect.any(String))
+    expect(content.quiz.questions[0]).toMatchObject({ question: '¿Qué pigmento capta la luz?', options: ['Clorofila', 'Melanina'], correctOptionIndex: 0 })
+    expect(content.quiz.questions[0].optionIds).toHaveLength(2)
+    expect(content.quiz).toMatchObject({ attempts: [], bestScore: null })
+  })
+
+  it('debe listar las notas guardadas con conteos y sin cargar el contenido', async () => {
+    const { body } = await create('full')
+    await idle()
+
+    const res = await list()
+    expect(res.status).toBe(200)
+    expect(res.body.data[0]).toMatchObject({
+      id: body.data.id,
+      status: 'completed',
+      materials: ['notes', 'flashcards', 'quiz'],
+      counts: { blocks: 9, flashcards: 1, questions: 1 },
+      content: null,
+    })
+    expect((await list(OTHER_TOKEN)).body.data).toEqual([])
+  })
+
+  it('debe seguir sirviendo el material después de reiniciar el back (sin audio ni metadata del archivo)', async () => {
+    const { body } = await create('flashcards', { fields: { originalName: 'Clase 9.mp3' } })
+    await idle()
+
+    await buildApp({}, { keepStore: true })
+
+    const items = (await list()).body.data
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ id: body.data.id, status: 'completed', outputType: 'flashcards', audio: { available: false } })
+
+    const res = await get(body.data.id)
+    expect(res.status).toBe(200)
+    expect(res.body.data.content.flashcards.cards).toHaveLength(1)
+    expect((await get(body.data.id, OTHER_TOKEN)).status).toBe(404)
+
+    // Sin el audio no se puede generar más material
+    const more = await action(body.data.id, 'materials', { materials: ['quiz'] })
+    expect(more.status).toBe(410)
+    expect(more.body.error.code).toBe('AUDIO_EXPIRED')
+  })
+
+  it('debe agregar a la misma nota el material que se genera después', async () => {
+    const { body } = await create('flashcards')
+    await idle()
+    await action(body.data.id, 'materials', { materials: ['quiz'] })
+    await idle()
+
+    expect(studyStore.tables.note).toHaveLength(1)
+    expect(studyStore.tables.mazo).toHaveLength(1)
+    expect(studyStore.tables.cuestionario).toHaveLength(1)
+    expect((await get(body.data.id)).body.data.materials).toEqual(['flashcards', 'quiz'])
+  })
+
+  it('si falla el guardado, debe quedar PERSISTENCE_FAILED y reintentar sin volver a llamar a la IA', async () => {
+    const save = studyStore.saveGenerated.bind(studyStore)
+    studyStore.saveGenerated = async () => {
+      throw new Error('Supabase caído')
+    }
+    const { body } = await create('quiz')
+    await idle()
+
+    const failed = (await get(body.data.id)).body.data
+    expect(failed.status).toBe('failed')
+    expect(failed.error.code).toBe('PERSISTENCE_FAILED')
+
+    studyStore.saveGenerated = save
+    expect((await action(body.data.id, 'retry')).status).toBe(202)
+    await idle()
+
+    expect((await get(body.data.id)).body.data).toMatchObject({ status: 'completed', materials: ['quiz'] })
+    expect(aiClient.calls).toHaveLength(1)
+  })
+
+  // ===== Repaso: flashcards (SM-2) e intentos de cuestionario =====
+  it('debe calificar una flashcard con SM-2 y guardar su estado', async () => {
+    const { body } = await create('flashcards')
+    await idle()
+    const cardId = (await get(body.data.id)).body.data.content.flashcards.cards[0].id
+
+    const first = await study(`flashcards/${cardId}/review`, { rating: 'good' })
+    expect(first.status).toBe(200)
+    expect(first.body.data.review).toMatchObject({ repetitions: 1, intervalDays: 1 })
+
+    const second = await study(`flashcards/${cardId}/review`, { rating: 'good' })
+    expect(second.body.data.review).toMatchObject({ repetitions: 2, intervalDays: 6 })
+    expect(studyStore.tables.flashcard_review).toHaveLength(1)
+
+    const card = (await get(body.data.id)).body.data.content.flashcards.cards[0]
+    expect(card.review).toMatchObject({ repetitions: 2, intervalDays: 6 })
+
+    expect((await study(`flashcards/${cardId}/review`, { rating: 'good' }, OTHER_TOKEN)).status).toBe(404)
+    expect((await study(`flashcards/${cardId}/review`, { rating: 'perfect' })).status).toBe(400)
+  })
+
+  it('debe guardar un intento del cuestionario calificado en el servidor', async () => {
+    const { body } = await create('quiz')
+    await idle()
+    const quiz = (await get(body.data.id)).body.data.content.quiz
+    const question = quiz.questions[0]
+
+    const res = await study(`quizzes/${quiz.id}/attempts`, {
+      startedAt: new Date().toISOString(),
+      answers: [{ questionId: question.id, optionId: question.optionIds[1] }],
+    })
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({ score: 0, total: 1, correctCount: 0 })
+
+    await study(`quizzes/${quiz.id}/attempts`, { answers: [{ questionId: question.id, optionId: question.optionIds[0] }] })
+    const saved = (await get(body.data.id)).body.data.content.quiz
+    expect(saved.attempts).toHaveLength(2)
+    expect(saved.bestScore).toBe(100)
+    expect(studyStore.tables.respuesta).toHaveLength(2)
+
+    expect((await study(`quizzes/${quiz.id}/attempts`, { answers: [{ questionId: question.id, optionId: null }] }, OTHER_TOKEN)).status).toBe(404)
+    expect((await study(`quizzes/${quiz.id}/attempts`, { answers: [] })).status).toBe(400)
   })
 })

@@ -4,6 +4,9 @@ import { TooManyRequestsError } from '../errors/httpErrors.js'
 // Rutas de consulta de la generación (GET /api/v1/generation y GET /api/v1/generation/:id[/audio])
 const GENERATION_PATH_RE = /^\/api\/v1\/generation(?:\/|\?|$)/
 
+// Rutas del repaso (una petición por flashcard calificada): tienen su propio límite
+const STUDY_PATH_RE = /^\/api\/v1\/study\//
+
 /**
  * Fábrica de limitadores de tasa (rate limiting).
  */
@@ -24,7 +27,8 @@ export function createRateLimiters() {
     max: 100,
     standardHeaders: true,
     legacyHeaders: false,
-    skip: (req) => req.method === 'GET' && GENERATION_PATH_RE.test(req.originalUrl),
+    skip: (req) =>
+      (req.method === 'GET' && GENERATION_PATH_RE.test(req.originalUrl)) || STUDY_PATH_RE.test(req.originalUrl),
     handler,
   })
 
@@ -56,5 +60,14 @@ export function createRateLimiters() {
     handler,
   })
 
-  return { general, auth, generation, polling }
+  // Repaso de flashcards y cuestionarios: 600 cada 15 minutos por IP
+  const study = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 600,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler,
+  })
+
+  return { general, auth, generation, polling, study }
 }

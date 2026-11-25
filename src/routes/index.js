@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { apiResponse } from '../utils/apiResponse.js'
 import { createAuthRouter } from '../modules/auth/auth.routes.js'
 import { createGenerationRouter } from '../modules/generation/generation.routes.js'
+import { createStudyRouter } from '../modules/study/study.routes.js'
 
 /**
  * Enrutador principal de la API (/api/v1).
@@ -42,6 +43,17 @@ export function createApiRouter(container) {
       authenticate: container.authenticate,
       validate: container.validate,
       mediaUpload: container.mediaUpload,
+    })
+  )
+
+  // Repaso del material guardado en Supabase (flashcards SM-2 e intentos de cuestionario)
+  router.use(
+    '/study',
+    createStudyRouter({
+      studyController: container.studyController,
+      rateLimiters: container.rateLimiters,
+      authenticate: container.authenticate,
+      validate: container.validate,
     })
   )
 

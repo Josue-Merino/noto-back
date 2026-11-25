@@ -56,6 +56,14 @@ export class InMemoryGenerationJobRepository {
   }
 
   /**
+   * @param {string} id
+   * @returns {Promise<boolean>}
+   */
+  async delete(id) {
+    return this.#jobs.delete(id)
+  }
+
+  /**
    * Todos los trabajos (para el barrido de retención).
    * @returns {Promise<object[]>}
    */

@@ -8,7 +8,7 @@ import {
   contentFromAi,
   emptyContent,
   materialsIn,
-  mergeContent,
+  outputTypeFor,
   resolveTitle,
   toJobDTO,
 } from '../../models/studyMaterial.model.js'
@@ -37,6 +37,11 @@ const titleFromFileName = (name) => name?.replace(/\.[^/.]+$/, '').trim() || 'Ma
  * una clase de dos horas no depende de mantener abierta una petición HTTP.
  *
  * El audio se conserva (hasta que vence) para reintentar, generar más material o reproducirlo.
+ *
+ * **Persistencia:** el estado de los trabajos en curso vive en memoria (el esquema de Supabase no
+ * tiene dónde guardarlo). Al completarse, el material se guarda en Supabase como una `note` con
+ * `note_id` = id del trabajo, y desde ese momento el contenido se lee de ahí. Si el backend se
+ * reinicia, la nota sigue disponible por el mismo id (sin audio ni metadata del archivo).
  */
 export class GenerationService {
   /** @type {Map<string, AbortController>} */
@@ -51,6 +56,7 @@ export class GenerationService {
    * @param {import('./audio.storage.js').TempDiskAudioStorage} dependencies.audioStorage
    * @param {{ prepare: Function }} dependencies.audioPreparer
    * @param {{ createStudyMaterial: Function }} dependencies.notoAiClient
+   * @param {import('../study/study.store.supabase.js').SupabaseStudyMaterialStore} dependencies.studyStore
    * @param {number} dependencies.retentionMs - Tiempo que se conserva el audio.
    * @param {import('pino').Logger} [dependencies.logger]
    * @param {() => string} [dependencies.generateId]
@@ -61,6 +67,7 @@ export class GenerationService {
     audioStorage,
     audioPreparer,
     notoAiClient,
+    studyStore,
     retentionMs,
     logger,
     generateId = randomUUID,
@@ -70,6 +77,7 @@ export class GenerationService {
     this.audioStorage = audioStorage
     this.audioPreparer = audioPreparer
     this.notoAiClient = notoAiClient
+    this.studyStore = studyStore
     this.retentionMs = retentionMs
     this.logger = logger
     this.generateId = generateId
@@ -128,8 +136,19 @@ export class GenerationService {
    * @param {string} userId
    */
   async list(userId) {
-    const jobs = await this.jobRepository.listByUser(userId)
-    return Promise.all(jobs.map((job) => this.#toDTO(job)))
+    const [jobs, notes] = await Promise.all([this.jobRepository.listByUser(userId), this.studyStore.list(userId)])
+    const pending = new Map(jobs.map((job) => [job.id, job]))
+
+    // Notas guardadas (sin cargar su contenido) + trabajos que todavía no tienen nota
+    const items = await Promise.all(
+      notes.map((note) => {
+        const job = pending.get(note.noteId)
+        pending.delete(note.noteId)
+        return this.#summaryDTO(job ?? this.#jobFromNote(userId, note), note)
+      })
+    )
+    const others = await Promise.all([...pending.values()].map((job) => this.#toDTO(job)))
+    return [...items, ...others].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
 
   /**
@@ -173,7 +192,8 @@ export class GenerationService {
     if (![JOB_STATUS.FAILED, JOB_STATUS.CANCELLED].includes(job.status)) {
       throw new ConflictError('Solo se puede reintentar una generación fallida o cancelada.', 'JOB_NOT_RETRYABLE')
     }
-    await this.#assertAudioAvailable(job)
+    // Si la IA ya respondió y solo falló el guardado, se reintenta el guardado (sin volver a pagar la IA)
+    if (!job.unsavedContent) await this.#assertAudioAvailable(job)
     return this.#requeue(job, job.pendingMaterials, accessToken)
   }
 
@@ -190,7 +210,9 @@ export class GenerationService {
       throw new ConflictError('Espera a que termine la generación en curso.', 'JOB_ACTIVE')
     }
 
-    const existing = materialsIn(job.content)
+    const existing = job.persisted
+      ? ((await this.studyStore.summary(userId, jobId))?.materials ?? [])
+      : materialsIn(job.content)
     const missing = MATERIAL_KEYS.filter((key) => materials.includes(key) && !existing.includes(key))
     if (missing.length === 0) {
       throw new BadRequestError('Ese material ya está generado.', 'NOTHING_TO_GENERATE')
@@ -223,7 +245,9 @@ export class GenerationService {
       const expired = job.audio?.path && new Date(job.audio.expiresAt).getTime() <= now
       if (expired && !ACTIVE_STATUSES.includes(job.status)) {
         await this.audioStorage.remove(job.audio.path)
-        await this.jobRepository.update(job.id, { audio: { ...job.audio, path: null } })
+        // Un trabajo ya guardado en Supabase no necesita seguir en memoria sin su audio
+        if (job.persisted && !job.unsavedContent) await this.jobRepository.delete(job.id)
+        else await this.jobRepository.update(job.id, { audio: { ...job.audio, path: null } })
         removed += 1
       }
     }
@@ -287,7 +311,7 @@ export class GenerationService {
       let job = await this.jobRepository.findById(jobId)
 
       // 1. Preparar el audio (duración + normalización); solo la primera vez
-      if (!job.audio.prepared) {
+      if (!job.unsavedContent && !job.audio.prepared) {
         job = await this.#update(jobId, signal, {
           status: JOB_STATUS.PREPARING,
           startedAt: this.#nowIso(),
@@ -315,29 +339,56 @@ export class GenerationService {
         if (!job) return
       }
 
-      // 2. Transcribir y generar con la IA
+      // 2. Transcribir y generar con la IA (salvo que ya se tenga la respuesta y solo faltara guardarla)
       job = await this.#update(jobId, signal, {
         status: JOB_STATUS.PROCESSING,
         startedAt: job.startedAt ?? this.#nowIso(),
       })
       if (!job) return
 
-      const aiResult = await this.notoAiClient.createStudyMaterial({
-        accessToken,
-        file: { path: job.audio.path, mimeType: job.audio.mimeType, originalName: job.source.originalName },
-        materials: job.pendingMaterials,
-        signal,
-      })
+      let generated = job.unsavedContent
+      if (!generated) {
+        const aiResult = await this.notoAiClient.createStudyMaterial({
+          accessToken,
+          file: { path: job.audio.path, mimeType: job.audio.mimeType, originalName: job.source.originalName },
+          materials: job.pendingMaterials,
+          signal,
+        })
+        generated = contentFromAi(aiResult)
+      }
+      if (signal.aborted) return
 
-      const content = mergeContent(job.content, contentFromAi(aiResult))
-      await this.#update(jobId, signal, {
+      // 3. Guardar en Supabase solo el material nuevo (la nota se crea la primera vez)
+      const title = job.persisted ? job.title : resolveTitle(generated, job.source.originalName)
+      try {
+        await this.studyStore.saveGenerated({ noteId: job.id, userId: job.userId, title, content: generated })
+      } catch (err) {
+        this.logger?.error({ jobId, err }, 'No se pudo guardar el material en Supabase')
+        await this.jobRepository.update(jobId, {
+          status: JOB_STATUS.FAILED,
+          unsavedContent: generated,
+          error: {
+            code: 'PERSISTENCE_FAILED',
+            message: 'Generamos tu material pero no pudimos guardarlo. Reintenta para guardarlo.',
+            statusCode: 503,
+          },
+          finishedAt: this.#nowIso(),
+          updatedAt: this.#nowIso(),
+        })
+        return
+      }
+
+      await this.jobRepository.update(jobId, {
         status: JOB_STATUS.COMPLETED,
-        content,
-        title: resolveTitle(content, job.source.originalName),
+        persisted: true,
+        content: null,
+        unsavedContent: null,
+        title,
         pendingMaterials: [],
         finishedAt: this.#nowIso(),
+        updatedAt: this.#nowIso(),
       })
-      this.logger?.info({ jobId, materials: materialsIn(content) }, 'Material de estudio generado')
+      this.logger?.info({ jobId, materials: materialsIn(generated) }, 'Material de estudio generado y guardado')
     } catch (err) {
       if (signal.aborted) return // cancelado: `cancel` ya dejó el estado final
 
@@ -379,10 +430,49 @@ export class GenerationService {
    */
   async #findOwned(userId, jobId) {
     const job = await this.jobRepository.findById(jobId)
-    if (!job || job.userId !== userId) {
-      throw new NotFoundError('No encontramos este material.', 'GENERATION_NOT_FOUND')
+    if (job && job.userId === userId) return job
+
+    // Ya no está en memoria (p. ej. tras un reinicio): se busca la nota guardada
+    const note = job ? null : await this.studyStore.summary(userId, jobId)
+    if (!note) throw new NotFoundError('No encontramos este material.', 'GENERATION_NOT_FOUND')
+    return this.#jobFromNote(userId, note)
+  }
+
+  /**
+   * "Trabajo" equivalente a una nota guardada que ya no está en memoria (sin audio ni metadata del archivo).
+   * @param {string} userId
+   * @param {{ noteId: string, title: string, createdAt: string, updatedAt: string, materials: string[] }} note
+   */
+  #jobFromNote(userId, note) {
+    return {
+      id: note.noteId,
+      userId,
+      status: JOB_STATUS.COMPLETED,
+      title: note.title,
+      outputType: outputTypeFor(note.materials),
+      pendingMaterials: [],
+      source: {},
+      audio: null,
+      content: null,
+      persisted: true,
+      error: null,
+      createdAt: note.createdAt,
+      updatedAt: note.updatedAt,
+      startedAt: null,
+      finishedAt: note.updatedAt,
     }
-    return job
+  }
+
+  /**
+   * DTO de lista: sin contenido, con los materiales y conteos de la nota.
+   * @param {object} job
+   * @param {{ title: string, materials: string[], counts: object }} note
+   */
+  async #summaryDTO(job, note) {
+    return toJobDTO(
+      { ...job, title: note.title || job.title, content: null },
+      { audioAvailable: await this.#isAudioAvailable(job), materials: note.materials, counts: note.counts }
+    )
   }
 
   /**
@@ -409,7 +499,15 @@ export class GenerationService {
    * @param {object} job
    */
   async #toDTO(job) {
-    return toJobDTO(job, { audioAvailable: await this.#isAudioAvailable(job) })
+    const audioAvailable = await this.#isAudioAvailable(job)
+    if (!job.persisted) return toJobDTO(job, { audioAvailable })
+
+    // Material guardado: el contenido (con ids de tarjetas, preguntas e intentos) sale de Supabase
+    const note = await this.studyStore.load(job.userId, job.id)
+    return toJobDTO(
+      { ...job, title: note?.title || job.title, content: note?.content ?? emptyContent() },
+      { audioAvailable }
+    )
   }
 
   #nowIso() {

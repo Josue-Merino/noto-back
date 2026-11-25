@@ -9,6 +9,9 @@ import { GenerationController } from './modules/generation/generation.controller
 import { InMemoryGenerationJobRepository } from './modules/generation/generationJob.repository.js'
 import { TempDiskAudioStorage } from './modules/generation/audio.storage.js'
 import { FfmpegAudioPreparer } from './modules/generation/audio.preparer.js'
+import { SupabaseStudyMaterialStore } from './modules/study/study.store.supabase.js'
+import { StudyService } from './modules/study/study.service.js'
+import { StudyController } from './modules/study/study.controller.js'
 import { createRateLimiters } from './middlewares/rateLimiters.js'
 import { createAuthenticateMiddleware } from './middlewares/authenticate.js'
 import { createErrorHandler } from './middlewares/errorHandler.js'
@@ -26,6 +29,7 @@ import { validate } from './middlewares/validate.js'
  * @param {{ createStudyMaterial: Function }} [dependencies.notoAiClient] - Inyectable para pruebas.
  * @param {{ prepare: Function }} [dependencies.audioPreparer] - Inyectable para pruebas.
  * @param {string} [dependencies.ffmpegPath] - Binario de ffmpeg (por defecto, el de `ffmpeg-static`).
+ * @param {object} [dependencies.studyStore] - Store del material (por defecto, las tablas de Supabase).
  */
 export function createContainer({
   env,
@@ -35,6 +39,7 @@ export function createContainer({
   notoAiClient,
   audioPreparer,
   ffmpegPath = ffmpegStaticPath,
+  studyStore,
 }) {
   const userRepository = new UserRepository({ supabaseAdmin })
 
@@ -64,8 +69,14 @@ export function createContainer({
       audioStorage,
       logger,
     })
+  // Material de estudio: tablas note/block, mazo/flashcard y cuestionario/pregunta/opcion de Supabase
+  const materialStore = studyStore ?? new SupabaseStudyMaterialStore({ supabaseAdmin })
+  const studyService = new StudyService({ studyStore: materialStore, logger })
+  const studyController = new StudyController({ studyService })
+
   const generationService = new GenerationService({
     jobRepository: new InMemoryGenerationJobRepository(),
+    studyStore: materialStore,
     audioStorage,
     audioPreparer: preparer,
     notoAiClient: aiClient,
@@ -90,6 +101,9 @@ export function createContainer({
     notoAiClient: aiClient,
     generationService,
     generationController,
+    studyStore: materialStore,
+    studyService,
+    studyController,
     mediaUpload,
     rateLimiters,
     authenticate,

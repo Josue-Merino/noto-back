@@ -125,17 +125,41 @@ export function materialsIn(content) {
 }
 
 /**
+ * Cantidad de elementos de cada material (bloques del apunte, flashcards y preguntas).
+ * @param {{ notes: object | null, flashcards: object | null, quiz: object | null } | null} content
+ */
+export function countsIn(content) {
+  return {
+    blocks: content?.notes?.blocks?.length ?? 0,
+    flashcards: content?.flashcards?.cards?.length ?? 0,
+    questions: content?.quiz?.questions?.length ?? 0,
+  }
+}
+
+/**
+ * Tipo de salida que corresponde a los materiales de una nota guardada.
+ * @param {string[]} materials
+ * @returns {'flashcards' | 'quiz' | 'full'}
+ */
+export function outputTypeFor(materials) {
+  if (materials.length === 1 && materials[0] === 'flashcards') return 'flashcards'
+  if (materials.length === 1 && materials[0] === 'quiz') return 'quiz'
+  return 'full'
+}
+
+/**
  * Representación pública de un trabajo de generación (nunca expone la ruta del archivo en disco).
  * @param {object} job
  * @param {{ audioAvailable: boolean }} [options]
  */
-export function toJobDTO(job, { audioAvailable = false } = {}) {
+export function toJobDTO(job, { audioAvailable = false, materials, counts } = {}) {
   return {
     id: job.id,
     status: job.status,
     title: job.title,
     outputType: job.outputType,
-    materials: materialsIn(job.content),
+    materials: materials ?? materialsIn(job.content),
+    counts: counts ?? countsIn(job.content),
     pendingMaterials: job.pendingMaterials ?? [],
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
