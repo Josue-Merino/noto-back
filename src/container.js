@@ -1,3 +1,4 @@
+import ffmpegStaticPath from 'ffmpeg-static'
 import { UserRepository } from './modules/users/user.repository.js'
 import { AuthService } from './modules/auth/auth.service.js'
 import { AuthController } from './modules/auth/auth.controller.js'
@@ -5,6 +6,9 @@ import { GENERATION_DEFAULTS } from './modules/generation/generation.config.js'
 import { NotoAiClient } from './modules/generation/noto-ai.client.js'
 import { GenerationService } from './modules/generation/generation.service.js'
 import { GenerationController } from './modules/generation/generation.controller.js'
+import { InMemoryGenerationJobRepository } from './modules/generation/generationJob.repository.js'
+import { TempDiskAudioStorage } from './modules/generation/audio.storage.js'
+import { FfmpegAudioPreparer } from './modules/generation/audio.preparer.js'
 import { createRateLimiters } from './middlewares/rateLimiters.js'
 import { createAuthenticateMiddleware } from './middlewares/authenticate.js'
 import { createErrorHandler } from './middlewares/errorHandler.js'
@@ -20,6 +24,8 @@ import { validate } from './middlewares/validate.js'
  * @param {() => import('@supabase/supabase-js').SupabaseClient} dependencies.createAnonClient
  * @param {import('pino').Logger} dependencies.logger
  * @param {{ createStudyMaterial: Function }} [dependencies.notoAiClient] - Inyectable para pruebas.
+ * @param {{ prepare: Function }} [dependencies.audioPreparer] - Inyectable para pruebas.
+ * @param {string} [dependencies.ffmpegPath] - Binario de ffmpeg (por defecto, el de `ffmpeg-static`).
  */
 export function createContainer({
   env,
@@ -27,6 +33,8 @@ export function createContainer({
   createAnonClient,
   logger,
   notoAiClient,
+  audioPreparer,
+  ffmpegPath = ffmpegStaticPath,
 }) {
   const userRepository = new UserRepository({ supabaseAdmin })
 
@@ -40,20 +48,35 @@ export function createContainer({
 
   const authController = new AuthController({ authService })
 
-  // Generación de material de estudio (servicio de IA)
+  // Generación de material de estudio (servicio de IA). Los valores de GENERATION_DEFAULTS son el
+  // respaldo cuando el env es parcial (p. ej. en las pruebas de otros módulos).
+  const config = { ...GENERATION_DEFAULTS, ...definedOnly(env) }
   const aiClient =
     notoAiClient ??
-    new NotoAiClient({
-      baseUrl: env.NOTO_AI_URL ?? GENERATION_DEFAULTS.NOTO_AI_URL,
-      timeoutMs: env.NOTO_AI_TIMEOUT_MS ?? GENERATION_DEFAULTS.NOTO_AI_TIMEOUT_MS,
+    new NotoAiClient({ baseUrl: config.NOTO_AI_URL, timeoutMs: config.NOTO_AI_TIMEOUT_MS, logger })
+  const audioStorage = new TempDiskAudioStorage({ directory: config.GENERATION_TMP_DIR })
+  const preparer =
+    audioPreparer ??
+    new FfmpegAudioPreparer({
+      ffmpegPath,
+      maxDurationSec: config.GENERATION_MAX_DURATION_SEC,
+      normalizeAboveBytes: config.GENERATION_NORMALIZE_ABOVE_MB * 1024 * 1024,
+      audioStorage,
       logger,
     })
-  const generationService = new GenerationService({ notoAiClient: aiClient, logger })
+  const generationService = new GenerationService({
+    jobRepository: new InMemoryGenerationJobRepository(),
+    audioStorage,
+    audioPreparer: preparer,
+    notoAiClient: aiClient,
+    retentionMs: config.GENERATION_RETENTION_HOURS * 60 * 60 * 1000,
+    logger,
+  })
   const generationController = new GenerationController({ generationService })
-  const maxFileSizeMb = env.GENERATION_MAX_FILE_SIZE_MB ?? GENERATION_DEFAULTS.GENERATION_MAX_FILE_SIZE_MB
   const mediaUpload = createMediaUpload({
     // multer exige un entero de bytes
-    maxFileSizeBytes: Math.floor(maxFileSizeMb * 1024 * 1024),
+    maxFileSizeBytes: Math.floor(config.GENERATION_MAX_FILE_SIZE_MB * 1024 * 1024),
+    directory: config.GENERATION_TMP_DIR,
   })
 
   const rateLimiters = createRateLimiters()
@@ -76,4 +99,12 @@ export function createContainer({
     logger,
     env,
   }
+}
+
+/**
+ * Quita las claves sin valor para que no pisen los valores por defecto.
+ * @param {Record<string, unknown>} obj
+ */
+function definedOnly(obj) {
+  return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined))
 }

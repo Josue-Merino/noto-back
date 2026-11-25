@@ -30,6 +30,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class GoneError extends AppError {
+  constructor(message = 'El recurso ya no está disponible', code = 'GONE', details = null) {
+    super(message, 410, code, details)
+  }
+}
+
 export class PayloadTooLargeError extends AppError {
   constructor(message = 'El contenido supera el tamaño máximo permitido', code = 'PAYLOAD_TOO_LARGE', details = null) {
     super(message, 413, code, details)

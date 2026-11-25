@@ -26,6 +26,17 @@ const server = app.listen(env.PORT, () => {
   )
 })
 
+// Subir un archivo de 1.5 GB con una conexión lenta tarda más que los 300 s que Node permite por defecto
+server.requestTimeout = env.HTTP_REQUEST_TIMEOUT_MS
+
+// Barrido de retención: borra los audios de generación vencidos (cada 30 minutos)
+const retentionTimer = setInterval(() => {
+  container.generationService.purgeExpiredAudio().catch((err) => {
+    logger.error({ err }, 'Error al borrar audios vencidos')
+  })
+}, 30 * 60 * 1000)
+retentionTimer.unref()
+
 // Cierre controlado y ordenado (Graceful Shutdown)
 function handleShutdown(signal) {
   logger.info({ signal }, `Señal ${signal} recibida. Cerrando servidor ordenadamente...`)

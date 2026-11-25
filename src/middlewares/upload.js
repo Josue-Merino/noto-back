@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto'
+import { mkdirSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
+import path from 'node:path'
 import multer from 'multer'
 import { AppError } from '../errors/AppError.js'
 import { BadRequestError, PayloadTooLargeError } from '../errors/httpErrors.js'
@@ -49,15 +53,42 @@ function toAppError(err, fieldName, maxFileSizeBytes) {
 }
 
 /**
- * Fábrica de middlewares de subida de un archivo multimedia (audio o video) en memoria.
- * Deja el archivo en `req.file` ({ buffer, originalname, mimetype, size }) y los campos de texto en `req.body`.
+ * Borra el archivo que multer dejó en disco (si lo hay). No falla si ya no existe.
+ * @param {import('express').Request} req
+ */
+export async function discardUploadedFile(req) {
+  if (req.file?.path) {
+    await rm(req.file.path, { force: true }).catch(() => {})
+  }
+}
+
+/**
+ * Middleware de error: si la petición falla después de recibir el archivo (p. ej. validación),
+ * borra el archivo temporal y deja pasar el error.
+ * @type {import('express').ErrorRequestHandler}
+ */
+export function discardUploadOnError(err, req, _res, next) {
+  discardUploadedFile(req).finally(() => next(err))
+}
+
+/**
+ * Fábrica de middlewares de subida de un archivo multimedia (audio o video) **a disco**.
+ * Un archivo de hasta 1.5 GB no puede vivir en memoria: multer lo escribe por partes en `directory`.
+ * Deja el archivo en `req.file` ({ path, originalname, mimetype, size }) y los campos de texto en `req.body`.
  * @param {object} options
  * @param {number} options.maxFileSizeBytes - Tamaño máximo aceptado por archivo.
+ * @param {string} options.directory - Carpeta donde se guardan los archivos recibidos.
  * @returns {(fieldName: string) => import('express').RequestHandler}
  */
-export function createMediaUpload({ maxFileSizeBytes }) {
+export function createMediaUpload({ maxFileSizeBytes, directory }) {
+  mkdirSync(directory, { recursive: true })
+
   const upload = multer({
-    storage: multer.memoryStorage(),
+    storage: multer.diskStorage({
+      destination: directory,
+      // Nombre aleatorio + extensión original (ffmpeg la usa para reconocer el formato)
+      filename: (_req, file, cb) => cb(null, `${randomUUID()}${path.extname(file.originalname || '').toLowerCase()}`),
+    }),
     limits: { fileSize: maxFileSizeBytes, files: 1 },
     fileFilter: (_req, file, cb) => {
       if (isMediaFile(file)) return cb(null, true)
@@ -70,6 +101,7 @@ export function createMediaUpload({ maxFileSizeBytes }) {
 
     return function mediaUpload(req, res, next) {
       handler(req, res, (err) => {
+        // multer ya borra el archivo parcial cuando falla la subida
         if (err) return next(toAppError(err, fieldName, maxFileSizeBytes))
 
         if (!req.file) {

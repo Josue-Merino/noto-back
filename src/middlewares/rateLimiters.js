@@ -1,6 +1,9 @@
 import rateLimit from 'express-rate-limit'
 import { TooManyRequestsError } from '../errors/httpErrors.js'
 
+// Rutas de consulta de la generación (GET /api/v1/generation y GET /api/v1/generation/:id[/audio])
+const GENERATION_PATH_RE = /^\/api\/v1\/generation(?:\/|\?|$)/
+
 /**
  * Fábrica de limitadores de tasa (rate limiting).
  */
@@ -14,12 +17,14 @@ export function createRateLimiters() {
     )
   }
 
-  // Limitador general: 100 peticiones cada 15 minutos por IP
+  // Limitador general: 100 peticiones cada 15 minutos por IP.
+  // Las consultas de estado de la generación tienen su propio límite (`polling`).
   const general = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,
     standardHeaders: true,
     legacyHeaders: false,
+    skip: (req) => req.method === 'GET' && GENERATION_PATH_RE.test(req.originalUrl),
     handler,
   })
 
@@ -41,5 +46,15 @@ export function createRateLimiters() {
     handler,
   })
 
-  return { general, auth, generation }
+  // Consultas de estado de la generación: el frontend pregunta cada pocos segundos mientras
+  // hay trabajos en curso (≈ 1 cada 4 s por pestaña): 900 cada 15 minutos por IP
+  const polling = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 900,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler,
+  })
+
+  return { general, auth, generation, polling }
 }

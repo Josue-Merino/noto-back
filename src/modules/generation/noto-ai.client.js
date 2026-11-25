@@ -1,3 +1,4 @@
+import { openAsBlob } from 'node:fs'
 import { Agent, fetch as undiciFetch, FormData } from 'undici'
 import {
   BadGatewayError,
@@ -52,17 +53,18 @@ export class NotoAiClient {
    * Transcribe el audio una sola vez y genera los materiales pedidos.
    * @param {object} params
    * @param {string} params.accessToken - JWT de Supabase del usuario (se reenvía en `access-token`).
-   * @param {{ buffer: Buffer, originalname?: string, mimetype?: string }} params.file
+   * @param {{ path?: string, buffer?: Buffer, originalName?: string, mimeType?: string }} params.file -
+   *   `path` se lee desde disco por partes (archivos grandes); `buffer` se envía tal cual.
    * @param {Array<'notes' | 'flashcards' | 'quiz'>} params.materials
+   * @param {AbortSignal} [params.signal] - Cancela la petición (el usuario canceló la generación).
    * @returns {Promise<{ notes: object | null, flashcards: object | null, quiz: object | null }>}
    */
-  async createStudyMaterial({ accessToken, file, materials }) {
+  async createStudyMaterial({ accessToken, file, materials, signal }) {
+    const type = file.mimeType || 'application/octet-stream'
+    const blob = file.path ? await openAsBlob(file.path, { type }) : new Blob([file.buffer], { type })
+
     const form = new FormData()
-    form.append(
-      'audio_file',
-      new Blob([file.buffer], { type: file.mimetype || 'application/octet-stream' }),
-      file.originalname || 'audio'
-    )
+    form.append('audio_file', blob, file.originalName || 'audio')
     for (const material of materials) {
       form.append('materials', material)
     }
@@ -74,7 +76,7 @@ export class NotoAiClient {
         method: 'POST',
         headers: { 'access-token': accessToken },
         body: form,
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]) : AbortSignal.timeout(this.timeoutMs),
         dispatcher: this.dispatcher,
       })
     } catch (err) {

@@ -19,6 +19,14 @@ const envSchema = z.object({
   NOTO_AI_URL: z.string().url('NOTO_AI_URL debe ser una URL válida').default(GENERATION_DEFAULTS.NOTO_AI_URL),
   NOTO_AI_TIMEOUT_MS: z.coerce.number().int().positive().default(GENERATION_DEFAULTS.NOTO_AI_TIMEOUT_MS),
   GENERATION_MAX_FILE_SIZE_MB: z.coerce.number().positive().default(GENERATION_DEFAULTS.GENERATION_MAX_FILE_SIZE_MB),
+  GENERATION_MAX_DURATION_SEC: z.coerce.number().positive().default(GENERATION_DEFAULTS.GENERATION_MAX_DURATION_SEC),
+  GENERATION_TMP_DIR: z.string().min(1).default(GENERATION_DEFAULTS.GENERATION_TMP_DIR),
+  GENERATION_NORMALIZE_ABOVE_MB: z.coerce
+    .number()
+    .nonnegative()
+    .default(GENERATION_DEFAULTS.GENERATION_NORMALIZE_ABOVE_MB),
+  GENERATION_RETENTION_HOURS: z.coerce.number().positive().default(GENERATION_DEFAULTS.GENERATION_RETENTION_HOURS),
+  HTTP_REQUEST_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(GENERATION_DEFAULTS.HTTP_REQUEST_TIMEOUT_MS),
 })
 
 /**

@@ -81,24 +81,81 @@ export function resolveTitle(content, originalName) {
   return fromFile || DEFAULT_TITLE
 }
 
+/** Materiales que sabe generar la IA, en el orden en que se muestran. */
+export const MATERIAL_KEYS = Object.freeze(['notes', 'flashcards', 'quiz'])
+
+/** Estados de un trabajo de generación. */
+export const JOB_STATUS = Object.freeze({
+  QUEUED: 'queued',
+  PREPARING: 'preparing',
+  PROCESSING: 'processing',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  CANCELLED: 'cancelled',
+})
+
+/** Estados en los que el trabajo todavía está corriendo. */
+export const ACTIVE_STATUSES = Object.freeze([JOB_STATUS.QUEUED, JOB_STATUS.PREPARING, JOB_STATUS.PROCESSING])
+
+/** Contenido vacío: ningún material generado todavía. */
+export function emptyContent() {
+  return { notes: null, flashcards: null, quiz: null }
+}
+
 /**
- * Representación pública del material de estudio.
- * @param {object} material
+ * Une el contenido nuevo al existente: lo que trae la IA reemplaza, lo demás se conserva.
+ * @param {{ notes: object | null, flashcards: object | null, quiz: object | null }} current
+ * @param {{ notes: object | null, flashcards: object | null, quiz: object | null }} incoming
  */
-export function toPublicDTO(material) {
+export function mergeContent(current, incoming) {
+  const merged = { ...emptyContent(), ...current }
+  for (const key of MATERIAL_KEYS) {
+    if (incoming?.[key]) merged[key] = incoming[key]
+  }
+  return merged
+}
+
+/**
+ * Materiales que ya tiene el contenido.
+ * @param {{ notes: object | null, flashcards: object | null, quiz: object | null }} content
+ * @returns {string[]}
+ */
+export function materialsIn(content) {
+  return MATERIAL_KEYS.filter((key) => Boolean(content?.[key]))
+}
+
+/**
+ * Representación pública de un trabajo de generación (nunca expone la ruta del archivo en disco).
+ * @param {object} job
+ * @param {{ audioAvailable: boolean }} [options]
+ */
+export function toJobDTO(job, { audioAvailable = false } = {}) {
   return {
-    id: material.id,
-    title: material.title,
-    outputType: material.outputType,
-    createdAt: material.createdAt,
+    id: job.id,
+    status: job.status,
+    title: job.title,
+    outputType: job.outputType,
+    materials: materialsIn(job.content),
+    pendingMaterials: job.pendingMaterials ?? [],
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt ?? null,
+    finishedAt: job.finishedAt ?? null,
     source: {
-      originType: material.source.originType ?? null,
-      originalName: material.source.originalName ?? null,
-      mimeType: material.source.mimeType ?? null,
-      sizeBytes: material.source.sizeBytes ?? null,
-      originalSizeBytes: material.source.originalSizeBytes ?? null,
-      durationSec: material.source.durationSec ?? null,
+      originType: job.source.originType ?? null,
+      originalName: job.source.originalName ?? null,
+      mimeType: job.source.mimeType ?? null,
+      sizeBytes: job.source.sizeBytes ?? null,
+      originalSizeBytes: job.source.originalSizeBytes ?? null,
+      durationSec: job.source.durationSec ?? null,
     },
-    content: material.content,
+    audio: {
+      available: audioAvailable,
+      mimeType: audioAvailable ? job.audio?.mimeType ?? null : null,
+      sizeBytes: audioAvailable ? job.audio?.sizeBytes ?? null : null,
+      expiresAt: audioAvailable ? job.audio?.expiresAt ?? null : null,
+    },
+    content: job.content,
+    error: job.error ?? null,
   }
 }

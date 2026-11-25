@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { MATERIAL_KEYS } from '../../models/studyMaterial.model.js'
 
 /** Tipos de salida que ofrece el frontend. */
 export const OUTPUT_TYPES = ['flashcards', 'quiz', 'full']
@@ -35,5 +36,19 @@ export const createGenerationSchema = z
       emptyToUndefined,
       z.coerce.number().nonnegative('La duración no puede ser negativa').optional()
     ),
+  })
+  .strict('No se permiten campos adicionales')
+
+/** Parámetro `:id` de las rutas de un trabajo. */
+export const generationIdParamsSchema = z.object({
+  id: z.string().uuid('El identificador del material no es válido'),
+})
+
+/** Cuerpo de POST /generation/:id/materials. */
+export const addMaterialsSchema = z
+  .object({
+    materials: z
+      .array(z.enum(MATERIAL_KEYS, { errorMap: () => ({ message: 'El material debe ser notes, flashcards o quiz' }) }))
+      .min(1, 'Elige al menos un material'),
   })
   .strict('No se permiten campos adicionales')
