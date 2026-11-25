@@ -47,8 +47,13 @@ cp .env.example .env
 | `PASSWORD_RESET_REDIRECT_URL` | URL para el enlace de recuperación de contraseña | `http://localhost:5173/reset-password` |
 | `LOG_LEVEL` | Nivel de logs de Pino (`debug`, `info`, `warn`, `error`) | `debug` |
 | `NOTO_AI_URL` | URL base del servicio de IA (`noto-ai-server`) | `http://localhost:8000` |
-| `NOTO_AI_TIMEOUT_MS` | Tiempo máximo de espera de una generación (transcripción + IA) | `1800000` (30 min) |
-| `GENERATION_MAX_FILE_SIZE_MB` | Tamaño máximo del archivo de audio/video aceptado | `500` |
+| `NOTO_AI_TIMEOUT_MS` | Tiempo máximo de espera de una generación (transcripción + IA) | `3600000` (60 min) |
+| `GENERATION_MAX_FILE_SIZE_MB` | Tamaño máximo del archivo de audio/video aceptado | `1536` (1.5 GB) |
+| `GENERATION_MAX_DURATION_SEC` | Duración máxima del audio (se mide con ffmpeg) | `7200` (2 h) |
+| `GENERATION_TMP_DIR` | Carpeta donde se guardan los audios recibidos mientras dura el trabajo | `<tmp del sistema>/noto-uploads` |
+| `GENERATION_NORMALIZE_ABOVE_MB` | Por encima de este tamaño (o si es video) el audio se convierte a Opus mono 16 kHz antes de enviarlo a la IA | `25` |
+| `GENERATION_RETENTION_HOURS` | Horas que se conserva el audio para reintentar, generar más material o reproducirlo | `24` |
+| `HTTP_REQUEST_TIMEOUT_MS` | Tiempo máximo de una petición HTTP (subidas grandes; Node corta a los 300 s por defecto) | `3600000` (1 h) |
 
 > 🔗 **Supabase compartido con la IA:** el backend reenvía el JWT del usuario a `noto-ai-server`, que lo valida con el JWKS de **su** `SUPABASE_URL`. Los dos servicios deben usar el **mismo proyecto de Supabase**; si no, la generación responde `502 AI_AUTH_REJECTED`.
 
@@ -119,7 +124,7 @@ backend/
 │  │  ├─ validate.js              # Validador de esquemas Zod (body, query, params)
 │  │  ├─ rateLimiters.js          # Limitadores de peticiones por IP
 │  │  ├─ requestId.js             # Trazabilidad con X-Request-Id
-│  │  ├─ upload.js                # Subida multipart de audio/video con multer (en memoria)
+│  │  ├─ upload.js                # Subida multipart de audio/video con multer (a disco)
 │  │  ├─ notFound.js              # Manejador 404 uniforme
 │  │  └─ errorHandler.js          # Manejador de errores centralizado
 │  ├─ errors/
@@ -141,9 +146,12 @@ backend/
 │     ├─ generation/              # Módulo de Generación de material de estudio
 │     │  ├─ generation.routes.js
 │     │  ├─ generation.controller.js
-│     │  ├─ generation.service.js # outputType -> materiales que se le piden a la IA
+│     │  ├─ generation.service.js # Trabajos asíncronos: crear, procesar, cancelar, reintentar, generar más
 │     │  ├─ generation.schemas.js
-│     │  ├─ generation.config.js  # Valores por defecto (URL, timeout y tamaño máximo)
+│     │  ├─ generation.config.js  # Valores por defecto (URL, timeouts, límites, retención)
+│     │  ├─ generationJob.repository.js # Puerto + implementación en memoria de los trabajos
+│     │  ├─ audio.storage.js      # Audios en disco temporal (crear ruta, existe, borrar)
+│     │  ├─ audio.preparer.js     # ffmpeg-static: duración (≤ 2 h) y conversión a Opus
 │     │  └─ noto-ai.client.js     # Única clase que habla con noto-ai-server (+ mapeo de errores)
 │     └─ users/                   # Módulo de Usuarios
 │        └─ user.repository.js    # Acceso a la tabla public."user"
@@ -153,8 +161,9 @@ backend/
 ├─ tests/
 │  ├─ auth.register.test.js
 │  ├─ auth.login.test.js
-│  ├─ generation.create.test.js   # Endpoint de generación con un cliente de IA falso
-│  ├─ notoAi.client.test.js       # Cliente de la IA con fetch simulado (multipart y errores)
+│  ├─ generation.jobs.test.js     # Trabajos de generación con IA y preparador falsos
+│  ├─ audio.preparer.test.js      # ffmpeg real con archivos sintéticos de pocos segundos
+│  ├─ notoAi.client.test.js       # Cliente de la IA con fetch simulado (multipart desde disco y errores)
 │  └─ helpers/
 │     └─ fakeSupabase.js          # Doble de prueba aislado de Supabase
 ├─ .env.example
@@ -182,50 +191,91 @@ Formato de respuesta uniforme:
 | `POST` | `/api/v1/auth/reset-password` | Sí | Restablecer contraseña con token de recuperación |
 | `POST` | `/api/v1/auth/change-password` | Sí | Cambio de contraseña verificando la actual |
 | `GET` | `/api/v1/auth/me` | Sí | Consulta de perfil del usuario autenticado |
-| `POST` | `/api/v1/generation/create` | Sí | Genera notas, flashcards y/o cuestionario a partir de un audio (multipart) |
+| `POST` | `/api/v1/generation/create` | Sí | Sube un audio y crea un trabajo de generación (`202`) |
+| `GET` | `/api/v1/generation` | Sí | Trabajos del usuario (más recientes primero) |
+| `GET` | `/api/v1/generation/:id` | Sí | Estado y contenido de un trabajo |
+| `GET` | `/api/v1/generation/:id/audio` | Sí | Audio original guardado (para reproducirlo) |
+| `POST` | `/api/v1/generation/:id/cancel` | Sí | Cancela un trabajo en curso |
+| `POST` | `/api/v1/generation/:id/retry` | Sí | Reintenta un trabajo fallido o cancelado con el audio guardado (`202`) |
+| `POST` | `/api/v1/generation/:id/materials` | Sí | Genera los materiales que faltan con el audio guardado (`202`) |
 
-### Generación de material de estudio
+### Generación de material de estudio (trabajos asíncronos)
+
+La IA tarda minutos y no informa avance, así que cada generación es un **trabajo**:
+`queued → preparing (ffmpeg) → processing (IA) → completed | failed | cancelled`. El frontend lo
+crea, recibe `202` al instante y consulta `GET /generation/:id` cada pocos segundos. Las consultas
+tienen su propio límite (900 cada 15 min) y no cuentan para el límite general.
 
 `POST /api/v1/generation/create` recibe `multipart/form-data`:
 
 | Campo | Obligatorio | Descripción |
 |---|---|---|
-| `file` | Sí | Audio o video (`audio/*`, `video/*` o extensión conocida). Máx. `GENERATION_MAX_FILE_SIZE_MB`. |
+| `file` | Sí | Audio o video (`audio/*`, `video/*` o extensión conocida). Máx. `GENERATION_MAX_FILE_SIZE_MB` (1.5 GB). Se guarda en disco, no en memoria. |
 | `outputType` | Sí | `flashcards` → solo flashcards · `quiz` → solo cuestionario · `full` → notas + flashcards + cuestionario |
 | `originType` | No | `file` o `recording` |
-| `originalName`, `originalSize`, `durationSec` | No | Metadatos del archivo original (antes de comprimirlo en el navegador) |
+| `originalName`, `originalSize`, `durationSec` | No | Metadatos del archivo original (antes de comprimirlo en el navegador). `durationSec` se usa si la cabecera del archivo no trae la duración. |
 
-El backend llama a `POST {NOTO_AI_URL}/study-material/` reenviando el JWT del usuario en el header `access-token`. Con `full`, los tres materiales salen de **una sola** transcripción. Sin base de datos por ahora: el material solo vive en la respuesta.
+En segundo plano:
+1. `FfmpegAudioPreparer` lee la duración y rechaza los audios de más de 2 horas (`AUDIO_TOO_LONG`).
+2. Si es video o pesa más de `GENERATION_NORMALIZE_ABOVE_MB`, lo convierte a Opus mono 16 kHz
+   32 kbps. Así la IA nunca recibe un archivo de 1.5 GB: dos horas de clase quedan en unos 30-40 MB.
+3. Llama a `POST {NOTO_AI_URL}/study-material/` leyendo el audio del disco y reenviando el JWT del
+   usuario en el header `access-token`. Con `full`, los tres materiales salen de **una sola**
+   transcripción.
 
-Respuesta `201`:
+El audio se conserva `GENERATION_RETENTION_HOURS` para reintentar, generar más material y
+reproducirlo, y un barrido cada 30 min borra los vencidos. Sin base de datos por ahora: los trabajos
+viven en memoria (`InMemoryGenerationJobRepository`) y se pierden al reiniciar.
+
+Respuesta (la misma forma en todas las rutas del módulo):
 
 ```json
 {
   "success": true,
-  "message": "Material de estudio generado exitosamente.",
   "data": {
     "id": "uuid",
+    "status": "completed",
     "title": "Fotosíntesis",
     "outputType": "full",
+    "materials": ["notes", "flashcards", "quiz"],
+    "pendingMaterials": [],
     "createdAt": "2026-11-24T20:00:00.000Z",
+    "updatedAt": "2026-11-24T20:03:10.000Z",
+    "startedAt": "2026-11-24T20:00:01.000Z",
+    "finishedAt": "2026-11-24T20:03:10.000Z",
     "source": { "originType": "file", "originalName": "clase.mp4", "mimeType": "audio/webm", "sizeBytes": 1048576, "originalSizeBytes": 104857600, "durationSec": 3125 },
+    "audio": { "available": true, "mimeType": "audio/webm", "sizeBytes": 1048576, "expiresAt": "2026-11-25T20:00:00.000Z" },
     "content": {
       "notes": { "title": "...", "language": "es", "summary": "...", "blocks": [{ "type": "heading1", "text": "...", "emoji": "🌱" }], "actionItems": [], "supportMaterial": [], "homework": [] },
       "flashcards": { "title": "...", "language": "es", "cards": [{ "front": "...", "back": "..." }] },
       "quiz": { "title": "...", "language": "es", "questions": [{ "question": "...", "options": ["..."], "correctOptionIndex": 0, "explanation": "..." }] }
-    }
+    },
+    "error": null
   }
 }
 ```
 
-Los materiales que no se pidieron vienen en `null`. Errores propios del módulo:
+Los materiales que no se generaron vienen en `null`. Si el trabajo falla, `error` es
+`{ code, message, statusCode }` y el audio sigue disponible para reintentar.
+
+Errores al **subir** (respuesta HTTP):
 
 | Status | Código | Causa |
 |---|---|---|
 | `400` | `FILE_REQUIRED` · `INVALID_FILE_TYPE` · `VALIDATION_ERROR` | Falta el archivo, no es audio/video o `outputType` inválido |
+| `404` | `GENERATION_NOT_FOUND` | El trabajo no existe o es de otro usuario |
+| `409` | `JOB_NOT_ACTIVE` · `JOB_NOT_RETRYABLE` · `JOB_ACTIVE` | Cancelar uno que ya terminó, reintentar uno que no falló o generar más con uno en curso |
+| `400` | `NOTHING_TO_GENERATE` | Los materiales pedidos ya existen |
+| `410` | `AUDIO_EXPIRED` | El audio ya se borró (pasó el tiempo de retención) |
 | `413` | `FILE_TOO_LARGE` | El archivo supera el límite |
+| `429` | `RATE_LIMITED` | Más de 30 generaciones o reintentos por hora desde la misma IP |
+
+Errores del **procesamiento** (quedan en `job.error`):
+
+| Status | Código | Causa |
+|---|---|---|
+| `422` | `AUDIO_TOO_LONG` · `PREPARATION_FAILED` | Audio de más de 2 horas o archivo que ffmpeg no puede leer |
 | `422` | `TRANSCRIPTION_FAILED` | La IA no pudo transcribir el audio (vacío, sin voz o formato inválido) |
-| `429` | `RATE_LIMITED` | Más de 30 generaciones por hora desde la misma IP |
 | `502` | `AI_AUTH_REJECTED` | La IA rechazó el JWT (proyectos de Supabase distintos). No es `401` a propósito, para que el frontend no cierre la sesión |
 | `502` | `AI_GENERATION_FAILED` · `AI_SERVICE_ERROR` · `AI_BAD_REQUEST` · `AI_INVALID_RESPONSE` | Falla del servicio de IA |
 | `503` | `AI_SERVICE_UNAVAILABLE` | `noto-ai-server` no está levantado o no es accesible |
@@ -269,8 +319,12 @@ curl -X GET http://localhost:3000/api/v1/auth/me \
 curl -X POST http://localhost:3000/api/v1/generation/create \
   -H "Authorization: Bearer <ACCESS_TOKEN>" \
   -F "file=@clase.webm" \
-  -F "outputType=full" \
-  --max-time 1800
+  -F "outputType=full"
+# → 202 con data.id
+
+# Consultar hasta que status sea completed o failed
+curl http://localhost:3000/api/v1/generation/<ID> \
+  -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
 ---
