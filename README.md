@@ -63,17 +63,36 @@ cp .env.example .env
 
 ## 🗄️ Configuración en Supabase
 
-### 1. Crear el proyecto
-1. Ve a [Supabase Dashboard](https://app.supabase.com) y crea un nuevo proyecto.
-2. Anota la **Project URL**, la **Anon Key** y la **service_role Key** desde `Project Settings` > `API`.
+### 1. Proyecto
+El proyecto de Noto es **`eluxfpkoastufmznbuzf`**, que ya tiene todo el esquema.
+1. Anota la **Project URL**, la **Anon Key** y la **service_role Key** desde `Project Settings` > `API`
+   y ponlas en `.env`.
+2. **noto-ai-server debe apuntar al mismo proyecto**: valida el JWT que le reenvía el back contra
+   `SUPABASE_JWS_URL` (`https://<ref>.supabase.co/auth/v1/.well-known/jwks.json`).
 
-### 2. Ejecutar la migración SQL
-1. En el panel de Supabase, entra al **SQL Editor**.
-2. Copia y ejecuta el contenido del archivo [`supabase/migrations/001_create_user_table.sql`](./supabase/migrations/001_create_user_table.sql).
-3. Este script creará:
-   - La tabla `public."user"` vinculada a `auth.users(id)`.
-   - Triggers automáticos para `updated_at`.
-   - Políticas de seguridad a nivel de fila (**Row Level Security - RLS**).
+### 2. Migraciones SQL (desde el **SQL Editor**, en orden)
+En `eluxfp` las tablas ya existen; la 002 ya se corrió ahí y solo agregó índices, triggers de
+`updated_at`, RLS y permisos. Para crear un proyecto nuevo desde cero, corre las dos:
+1. [`001_create_user_table.sql`](./supabase/migrations/001_create_user_table.sql): tabla
+   `public."user"` vinculada a `auth.users(id)`, la función `handle_updated_at` y RLS.
+2. [`002_create_study_material_tables.sql`](./supabase/migrations/002_create_study_material_tables.sql):
+   tablas del material de estudio, índices, RLS y permisos.
+   Es idempotente y al final recarga el esquema de la API (`notify pgrst`).
+
+Tablas que usa el backend (`public`):
+
+| Tabla | Para qué |
+|---|---|
+| `user` | Perfil: `name`, `last_name`, `nickname` (obligatorio; si no hay, se usa el nombre), `credits`, `image_url`. El correo y la fecha de alta salen de Supabase Auth; el segundo nombre y el segundo apellido, de `user_metadata`. |
+| `note` + `block` | El apunte. `note_id` = id del trabajo de generación. Los bloques son una lista enlazada (`previous_block_id` / `next_block_id`) con el mismo formato que escribe la IA: Resumen → Contenido → Items de Acción / Material de Apoyo / Tarea. |
+| `mazo` + `flashcard` | Las flashcards (`orden`, `frente`, `reverso`). |
+| `flashcard_review` | Repaso espaciado SM-2: una fila de estado por tarjeta (`ease_factor`, `interval_days`, `repetitions`, `next_review_at`). |
+| `cuestionario` + `pregunta` + `opcion` | El cuestionario (`es_correcta` marca la opción correcta). |
+| `intento` + `respuesta` | Intentos del cuestionario, calificados en el servidor. |
+
+`folder` también se crea (`note.folder_id`), pero todavía no se usa. El backend escribe con la
+**service_role key** y filtra siempre por el usuario autenticado; las políticas RLS son defensa en
+profundidad.
 
 ### 3. Configurar Auth y confirmación de correo
 1. Ve a **Authentication** > **Providers** > **Email**.
@@ -153,6 +172,11 @@ backend/
 │     │  ├─ audio.storage.js      # Audios en disco temporal (crear ruta, existe, borrar)
 │     │  ├─ audio.preparer.js     # ffmpeg-static: duración (≤ 2 h) y conversión a Opus
 │     │  └─ noto-ai.client.js     # Única clase que habla con noto-ai-server (+ mapeo de errores)
+│     ├─ study/                   # Material guardado en Supabase y repaso
+│     │  ├─ study.mappers.js      # Dominio ↔ filas (note/block, mazo/flashcard, cuestionario…) + SM-2
+│     │  ├─ study.store.supabase.js # Puerto: guardar, leer, listar, calificar flashcards, intentos
+│     │  ├─ study.store.memory.js # Misma interfaz en memoria (pruebas y demo)
+│     │  └─ study.{service,controller,routes,schemas}.js # POST /study/…
 │     └─ users/                   # Módulo de Usuarios
 │        └─ user.repository.js    # Acceso a la tabla public."user"
 ├─ supabase/
@@ -224,8 +248,21 @@ En segundo plano:
    transcripción.
 
 El audio se conserva `GENERATION_RETENTION_HOURS` para reintentar, generar más material y
-reproducirlo, y un barrido cada 30 min borra los vencidos. Sin base de datos por ahora: los trabajos
-viven en memoria (`InMemoryGenerationJobRepository`) y se pierden al reiniciar.
+reproducirlo, y un barrido cada 30 min borra los vencidos.
+
+**Persistencia.** El estado de un trabajo en curso (en cola, procesando, falló) vive en memoria
+(`InMemoryGenerationJobRepository`): el esquema no tiene dónde guardarlo. Al completarse, el material
+se guarda en Supabase (`SupabaseStudyMaterialStore`) como una `note` con `note_id` = id del trabajo,
+y desde ese momento el contenido se lee de ahí:
+
+- `GET /generation` junta las notas guardadas (con `counts` y `content: null`) y los trabajos en
+  memoria que todavía no tienen nota.
+- `GET /generation/:id` devuelve el contenido completo con ids de tarjetas, preguntas y opciones,
+  el estado de repaso de cada tarjeta y los últimos intentos del cuestionario.
+- **Tras reiniciar el back** las notas siguen disponibles por el mismo id. Se pierden el audio y la
+  metadata del archivo (nombre, duración), porque no hay columnas para guardarlos.
+- Si la IA responde pero falla el guardado, el trabajo queda `failed` con `PERSISTENCE_FAILED` y el
+  contenido en memoria: **Reintentar** solo vuelve a guardar, sin llamar otra vez a la IA.
 
 Respuesta (la misma forma en todas las rutas del módulo):
 
@@ -280,6 +317,19 @@ Errores del **procesamiento** (quedan en `job.error`):
 | `502` | `AI_GENERATION_FAILED` · `AI_SERVICE_ERROR` · `AI_BAD_REQUEST` · `AI_INVALID_RESPONSE` | Falla del servicio de IA |
 | `503` | `AI_SERVICE_UNAVAILABLE` | `noto-ai-server` no está levantado o no es accesible |
 | `504` | `AI_TIMEOUT` | La generación superó `NOTO_AI_TIMEOUT_MS` |
+
+### Repaso (`/api/v1/study`)
+
+| Método | Ruta | Cuerpo | Respuesta |
+|---|---|---|---|
+| `POST` | `/study/flashcards/:flashcardId/review` | `{ "rating": "again" \| "hard" \| "good" \| "easy" }` | `200` · `{ flashcardId, review: { easeFactor, intervalDays, repetitions, nextReviewAt, lastReviewedAt } }` |
+| `POST` | `/study/quizzes/:quizId/attempts` | `{ "startedAt"?: ISO, "answers": [{ "questionId", "optionId" }] }` | `201` · `{ id, score, total, correctCount, startedAt, finishedAt }` |
+
+- La calificación usa SM-2: "Otra vez" deja la tarjeta pendiente de inmediato; "Bien" da 1 día,
+  luego 6 y después `intervalo × ease factor`.
+- El intento se califica en el servidor con `opcion.es_correcta` (no se confía en el cliente).
+- `404 FLASHCARD_NOT_FOUND` / `QUIZ_NOT_FOUND` si no existe o es de otro usuario. Límite propio:
+  600 peticiones cada 15 min por IP.
 
 ### Ejemplos `curl`
 
