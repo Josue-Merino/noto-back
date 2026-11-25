@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { NotoAiClient } from '../src/modules/generation/noto-ai.client.js'
 
-const FILE = { buffer: Buffer.from('audio'), originalname: 'clase.webm', mimetype: 'audio/webm' }
+const FILE = { buffer: Buffer.from('audio'), originalName: 'clase.webm', mimeType: 'audio/webm' }
 const OK_BODY = { notes: null, flashcards: { language: 'es', title: 'T', cards: [] }, quiz: null }
 
 const jsonResponse = (status, body) =>
@@ -47,6 +50,38 @@ describe('NotoAiClient', () => {
     expect(audio.name).toBe('clase.webm')
     expect(audio.type).toBe('audio/webm')
     expect(Buffer.from(await audio.arrayBuffer()).toString()).toBe('audio')
+  })
+
+  it('debe leer el audio desde disco cuando recibe una ruta (archivos grandes)', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'noto-ai-client-'))
+    try {
+      const filePath = path.join(dir, 'clase.webm')
+      await writeFile(filePath, 'audio desde disco')
+      const { client, requests } = buildClient(() => jsonResponse(200, OK_BODY))
+
+      await client.createStudyMaterial({
+        accessToken: 'user-jwt',
+        file: { path: filePath, originalName: 'Clase 4.webm', mimeType: 'audio/webm' },
+        materials: ['quiz'],
+      })
+
+      const audio = requests[0].init.body.get('audio_file')
+      expect(audio.name).toBe('Clase 4.webm')
+      expect(audio.type).toBe('audio/webm')
+      expect(Buffer.from(await audio.arrayBuffer()).toString()).toBe('audio desde disco')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('debe propagar la cancelación del usuario a la petición', async () => {
+    const controller = new AbortController()
+    const { client, requests } = buildClient(() => jsonResponse(200, OK_BODY))
+
+    await client.createStudyMaterial({ accessToken: 'jwt', file: FILE, materials: ['quiz'], signal: controller.signal })
+    controller.abort()
+
+    expect(requests[0].init.signal.aborted).toBe(true)
   })
 
   it.each([
