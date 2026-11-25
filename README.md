@@ -46,6 +46,11 @@ cp .env.example .env
 | `EMAIL_REDIRECT_URL` | URL a la que se redirige tras verificar correo | `http://localhost:5173/login` |
 | `PASSWORD_RESET_REDIRECT_URL` | URL para el enlace de recuperación de contraseña | `http://localhost:5173/reset-password` |
 | `LOG_LEVEL` | Nivel de logs de Pino (`debug`, `info`, `warn`, `error`) | `debug` |
+| `NOTO_AI_URL` | URL base del servicio de IA (`noto-ai-server`) | `http://localhost:8000` |
+| `NOTO_AI_TIMEOUT_MS` | Tiempo máximo de espera de una generación (transcripción + IA) | `1800000` (30 min) |
+| `GENERATION_MAX_FILE_SIZE_MB` | Tamaño máximo del archivo de audio/video aceptado | `500` |
+
+> 🔗 **Supabase compartido con la IA:** el backend reenvía el JWT del usuario a `noto-ai-server`, que lo valida con el JWKS de **su** `SUPABASE_URL`. Los dos servicios deben usar el **mismo proyecto de Supabase**; si no, la generación responde `502 AI_AUTH_REJECTED`.
 
 > ⚠️ **Importante:** La variable `SUPABASE_SERVICE_ROLE_KEY` otorga acceso total de administrador sin restricciones RLS. **Nunca** debe exponerse en el frontend ni subirse a repositorios públicos.
 
@@ -114,6 +119,7 @@ backend/
 │  │  ├─ validate.js              # Validador de esquemas Zod (body, query, params)
 │  │  ├─ rateLimiters.js          # Limitadores de peticiones por IP
 │  │  ├─ requestId.js             # Trazabilidad con X-Request-Id
+│  │  ├─ upload.js                # Subida multipart de audio/video con multer (en memoria)
 │  │  ├─ notFound.js              # Manejador 404 uniforme
 │  │  └─ errorHandler.js          # Manejador de errores centralizado
 │  ├─ errors/
@@ -123,7 +129,8 @@ backend/
 │  │  ├─ asyncHandler.js          # Envoltura asíncrona para Express
 │  │  └─ apiResponse.js           # Helpers uniformes success() y fail()
 │  ├─ models/
-│  │  └─ user.model.js            # Mapeos fila de BD <-> dominio <-> DTO público
+│  │  ├─ user.model.js            # Mapeos fila de BD <-> dominio <-> DTO público
+│  │  └─ studyMaterial.model.js   # Mapeo respuesta de la IA (snake_case) <-> DTO público (camelCase)
 │  └─ modules/
 │     ├─ auth/                    # Módulo de Autenticación
 │     │  ├─ auth.routes.js
@@ -131,6 +138,13 @@ backend/
 │     │  ├─ auth.service.js
 │     │  ├─ auth.schemas.js
 │     │  └─ auth.errors.js
+│     ├─ generation/              # Módulo de Generación de material de estudio
+│     │  ├─ generation.routes.js
+│     │  ├─ generation.controller.js
+│     │  ├─ generation.service.js # outputType -> materiales que se le piden a la IA
+│     │  ├─ generation.schemas.js
+│     │  ├─ generation.config.js  # Valores por defecto (URL, timeout y tamaño máximo)
+│     │  └─ noto-ai.client.js     # Única clase que habla con noto-ai-server (+ mapeo de errores)
 │     └─ users/                   # Módulo de Usuarios
 │        └─ user.repository.js    # Acceso a la tabla public."user"
 ├─ supabase/
@@ -139,6 +153,8 @@ backend/
 ├─ tests/
 │  ├─ auth.register.test.js
 │  ├─ auth.login.test.js
+│  ├─ generation.create.test.js   # Endpoint de generación con un cliente de IA falso
+│  ├─ notoAi.client.test.js       # Cliente de la IA con fetch simulado (multipart y errores)
 │  └─ helpers/
 │     └─ fakeSupabase.js          # Doble de prueba aislado de Supabase
 ├─ .env.example
@@ -166,6 +182,54 @@ Formato de respuesta uniforme:
 | `POST` | `/api/v1/auth/reset-password` | Sí | Restablecer contraseña con token de recuperación |
 | `POST` | `/api/v1/auth/change-password` | Sí | Cambio de contraseña verificando la actual |
 | `GET` | `/api/v1/auth/me` | Sí | Consulta de perfil del usuario autenticado |
+| `POST` | `/api/v1/generation/create` | Sí | Genera notas, flashcards y/o cuestionario a partir de un audio (multipart) |
+
+### Generación de material de estudio
+
+`POST /api/v1/generation/create` recibe `multipart/form-data`:
+
+| Campo | Obligatorio | Descripción |
+|---|---|---|
+| `file` | Sí | Audio o video (`audio/*`, `video/*` o extensión conocida). Máx. `GENERATION_MAX_FILE_SIZE_MB`. |
+| `outputType` | Sí | `flashcards` → solo flashcards · `quiz` → solo cuestionario · `full` → notas + flashcards + cuestionario |
+| `originType` | No | `file` o `recording` |
+| `originalName`, `originalSize`, `durationSec` | No | Metadatos del archivo original (antes de comprimirlo en el navegador) |
+
+El backend llama a `POST {NOTO_AI_URL}/study-material/` reenviando el JWT del usuario en el header `access-token`. Con `full`, los tres materiales salen de **una sola** transcripción. Sin base de datos por ahora: el material solo vive en la respuesta.
+
+Respuesta `201`:
+
+```json
+{
+  "success": true,
+  "message": "Material de estudio generado exitosamente.",
+  "data": {
+    "id": "uuid",
+    "title": "Fotosíntesis",
+    "outputType": "full",
+    "createdAt": "2026-11-24T20:00:00.000Z",
+    "source": { "originType": "file", "originalName": "clase.mp4", "mimeType": "audio/webm", "sizeBytes": 1048576, "originalSizeBytes": 104857600, "durationSec": 3125 },
+    "content": {
+      "notes": { "title": "...", "language": "es", "summary": "...", "blocks": [{ "type": "heading1", "text": "...", "emoji": "🌱" }], "actionItems": [], "supportMaterial": [], "homework": [] },
+      "flashcards": { "title": "...", "language": "es", "cards": [{ "front": "...", "back": "..." }] },
+      "quiz": { "title": "...", "language": "es", "questions": [{ "question": "...", "options": ["..."], "correctOptionIndex": 0, "explanation": "..." }] }
+    }
+  }
+}
+```
+
+Los materiales que no se pidieron vienen en `null`. Errores propios del módulo:
+
+| Status | Código | Causa |
+|---|---|---|
+| `400` | `FILE_REQUIRED` · `INVALID_FILE_TYPE` · `VALIDATION_ERROR` | Falta el archivo, no es audio/video o `outputType` inválido |
+| `413` | `FILE_TOO_LARGE` | El archivo supera el límite |
+| `422` | `TRANSCRIPTION_FAILED` | La IA no pudo transcribir el audio (vacío, sin voz o formato inválido) |
+| `429` | `RATE_LIMITED` | Más de 30 generaciones por hora desde la misma IP |
+| `502` | `AI_AUTH_REJECTED` | La IA rechazó el JWT (proyectos de Supabase distintos). No es `401` a propósito, para que el frontend no cierre la sesión |
+| `502` | `AI_GENERATION_FAILED` · `AI_SERVICE_ERROR` · `AI_BAD_REQUEST` · `AI_INVALID_RESPONSE` | Falla del servicio de IA |
+| `503` | `AI_SERVICE_UNAVAILABLE` | `noto-ai-server` no está levantado o no es accesible |
+| `504` | `AI_TIMEOUT` | La generación superó `NOTO_AI_TIMEOUT_MS` |
 
 ### Ejemplos `curl`
 
@@ -198,6 +262,15 @@ curl -X POST http://localhost:3000/api/v1/auth/login \
 ```bash
 curl -X GET http://localhost:3000/api/v1/auth/me \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
+```
+
+#### 4. Generar material de estudio (requiere `noto-ai-server` levantado)
+```bash
+curl -X POST http://localhost:3000/api/v1/generation/create \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -F "file=@clase.webm" \
+  -F "outputType=full" \
+  --max-time 1800
 ```
 
 ---
